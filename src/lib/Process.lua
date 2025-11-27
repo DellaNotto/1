@@ -1,74 +1,81 @@
-type table = {
-    [any]: any
+--[[
+    Sigma Spy Process Module
+    Handles remote processing, data management, and executor compatibility
+    
+    Optimizations:
+    - Better memory management with weak tables
+    - Improved deep cloning with cycle detection
+    - More efficient remote checking
+    - Enhanced error handling
+    - Type safety improvements
+]]
+
+export type RemoteClassData = {
+    Send: {string},
+    Receive: {string},
+    IsRemoteFunction: boolean?,
+    NoReciveHook: boolean?
 }
 
-type RemoteData = {
-	Remote: Instance,
+export type RemoteData = {
+    Remote: Instance,
     NoBacktrace: boolean?,
-	IsReceive: boolean?,
-	Args: table,
+    IsReceive: boolean?,
+    Args: {any},
     Id: string,
-	Method: string,
+    Method: string,
     TransferType: string,
-	ValueReplacements: table,
-    ReturnValues: table,
-    OriginalFunc: (Instance, ...any) -> ...any
+    ValueReplacements: {[any]: any}?,
+    ReturnValues: {any}?,
+    OriginalFunc: ((Instance, ...any) -> ...any)?,
+    MetaMethod: string?,
+    IsExploit: boolean?,
+    ClassData: RemoteClassData?,
+    Timestamp: number?,
+    CallingScript: Instance?,
+    CallingFunction: ((...any) -> ...any)?,
+    SourceScript: Instance?
 }
 
---// Module
+export type RemoteOptions = {
+    Excluded: boolean,
+    Blocked: boolean
+}
+
 local Process = {
-    --// Remote classes
+    --// Remote class definitions
     RemoteClassData = {
         ["RemoteEvent"] = {
-            Send = {
-                "FireServer",
-                "fireServer",
-            },
-            Receive = {
-                "OnClientEvent",
-            }
+            Send = {"FireServer", "fireServer"},
+            Receive = {"OnClientEvent"}
         },
         ["RemoteFunction"] = {
             IsRemoteFunction = true,
-            Send = {
-                "InvokeServer",
-                "invokeServer",
-            },
-            Receive = {
-                "OnClientInvoke",
-            }
+            Send = {"InvokeServer", "invokeServer"},
+            Receive = {"OnClientInvoke"}
         },
         ["UnreliableRemoteEvent"] = {
-            Send = {
-                "FireServer",
-                "fireServer",
-            },
-            Receive = {
-                "OnClientEvent",
-            }
+            Send = {"FireServer", "fireServer"},
+            Receive = {"OnClientEvent"}
         },
         ["BindableEvent"] = {
             NoReciveHook = true,
-            Send = {
-                "Fire",
-            },
-            Receive = {
-                "Event",
-            }
+            Send = {"Fire"},
+            Receive = {"Event"}
         },
         ["BindableFunction"] = {
             IsRemoteFunction = true,
             NoReciveHook = true,
-            Send = {
-                "Invoke",
-            },
-            Receive = {
-                "OnInvoke",
-            }
+            Send = {"Invoke"},
+            Receive = {"OnInvoke"}
         }
-    },
-    RemoteOptions = {},
-    LoopingRemotes = {},
+    } :: {[string]: RemoteClassData},
+    
+    RemoteOptions = {} :: {[string]: RemoteOptions},
+    LoopingRemotes = {} :: {[Instance]: boolean},
+    ExtraData = nil :: {[string]: any}?,
+    
+    --// Executor-specific configuration overwrites
     ConfigOverwrites = {
         [{"sirhurt", "potassium", "wave"}] = {
             ForceUseCustomComm = true
@@ -90,16 +97,42 @@ local HttpService: HttpService
 local Channel
 local WrappedChannel = false
 
+--// Environment reference for detection
 local SigmaENV = getfenv(1)
 
-function Process:Merge(Base: table, New: table)
-    if not New then return end
-	for Key, Value in next, New do
-		Base[Key] = Value
-	end
+--// Localized functions for performance
+local typeof = typeof
+local next = next
+local pcall = pcall
+local rawget = rawget
+local table_insert = table.insert
+local table_find = table.find
+local table_clear = table.clear
+local table_maxn = table.maxn
+local string_lower = string.lower
+local string_gsub = string.gsub
+local string_find = string.find
+
+--[[
+    Merges a source table into a base table
+    @param Base table - The table to merge into
+    @param New table? - The table to merge from
+]]
+function Process:Merge(Base: {[any]: any}, New: {[any]: any}?)
+    if not New then 
+        return 
+    end
+    
+    for Key, Value in next, New do
+        Base[Key] = Value
+    end
 end
 
-function Process:Init(Data)
+--[[
+    Initializes the Process module
+    @param Data table - Initialization data
+]]
+function Process:Init(Data: {Modules: {[string]: any}, Services: {[string]: any}})
     local Modules = Data.Modules
     local Services = Data.Services
 
@@ -114,51 +147,95 @@ function Process:Init(Data)
     ReturnSpoofs = Modules.ReturnSpoofs
 end
 
---// Communication
+--[[
+    Sets the communication channel
+    @param NewChannel BindableEvent - The new channel
+    @param IsWrapped boolean - Whether the channel is wrapped
+]]
 function Process:SetChannel(NewChannel: BindableEvent, IsWrapped: boolean)
     Channel = NewChannel
     WrappedChannel = IsWrapped
 end
 
-function Process:GetConfigOverwrites(Name: string)
+--[[
+    Gets configuration overwrites for a specific executor
+    @param Name string - The executor name
+    @return table? - Configuration overwrites
+]]
+function Process:GetConfigOverwrites(Name: string): {[string]: any}?
     local ConfigOverwrites = self.ConfigOverwrites
 
     for List, Overwrites in next, ConfigOverwrites do
-        if not table.find(List, Name) then continue end
+        if not table_find(List, Name) then 
+            continue 
+        end
         return Overwrites
     end
-    return
+    
+    return nil
 end
 
-function Process:CheckConfig(Config: table)
-    local Name = identifyexecutor():lower()
+--[[
+    Checks and applies configuration overwrites based on executor
+    @param ConfigTable table - The configuration to modify
+]]
+function Process:CheckConfig(ConfigTable: {[string]: any})
+    local Success, ExecutorName = pcall(identifyexecutor)
+    
+    if not Success then
+        return
+    end
+    
+    local Name = string_lower(ExecutorName)
 
-    --// Force configuration overwrites for specific executors
+    --// Apply overwrites for specific executors
     local Overwrites = self:GetConfigOverwrites(Name)
-    if not Overwrites then return end
-
-    self:Merge(Config, Overwrites)
+    if Overwrites then
+        self:Merge(ConfigTable, Overwrites)
+    end
 end
 
+--[[
+    Cleans C closure error messages for better readability
+    @param Error string - The error message
+    @return string - The cleaned error message
+]]
 function Process:CleanCError(Error: string): string
-    Error = Error:gsub(":%d+: ", "")
-    Error = Error:gsub(", got %a+", "")
-    Error = Error:gsub("invalid argument", "missing argument")
+    Error = string_gsub(Error, ":%d+: ", "")
+    Error = string_gsub(Error, ", got %a+", "")
+    Error = string_gsub(Error, "invalid argument", "missing argument")
     return Error
 end
 
+--[[
+    Counts pattern matches in a string
+    @param String string - The string to search
+    @param Match string - The pattern to match
+    @return number - The count of matches
+]]
 function Process:CountMatches(String: string, Match: string): number
-	local Count = 0
-	for _ in String:gmatch(Match) do
-		Count +=1 
-	end
+    local Count = 0
+    
+    for _ in string.gmatch(String, Match) do
+        Count = Count + 1
+    end
 
-	return Count
+    return Count
 end
 
-function Process:CheckValue(Value, Ignore: table?, Cache: table?)
+--[[
+    Checks and clones a value, handling tables and instances
+    @param Value any - The value to check
+    @param Ignore table? - Values to ignore
+    @param Cache table? - Visited table cache
+    @return any - The processed value
+]]
+function Process:CheckValue(Value: any, Ignore: {any}?, Cache: {[any]: any}?): any
     local Type = typeof(Value)
-    Communication:WaitCheck()
+    
+    if Communication then
+        Communication:WaitCheck()
+    end
     
     if Type == "table" then
         Value = self:DeepCloneTable(Value, Ignore, Cache)
@@ -169,11 +246,21 @@ function Process:CheckValue(Value, Ignore: table?, Cache: table?)
     return Value
 end
 
-function Process:DeepCloneTable(Table, Ignore: table?, Visited: table?): table
-    if typeof(Table) ~= "table" then return Table end
+--[[
+    Deep clones a table with cycle detection
+    @param Table table - The table to clone
+    @param Ignore table? - Values to ignore during cloning
+    @param Visited table? - Already visited tables (for cycle detection)
+    @return table - The cloned table
+]]
+function Process:DeepCloneTable(Table: {[any]: any}, Ignore: {any}?, Visited: {[any]: any}?): {[any]: any}
+    if typeof(Table) ~= "table" then 
+        return Table 
+    end
+    
     local Cache = Visited or {}
 
-    --// Check for cached
+    --// Check for already visited (cycle detection)
     if Cache[Table] then
         return Cache[Table]
     end
@@ -182,35 +269,58 @@ function Process:DeepCloneTable(Table, Ignore: table?, Visited: table?): table
     Cache[Table] = New
 
     for Key, Value in next, Table do
-        --// Check if the value is ignored
-        if Ignore and table.find(Ignore, Value) then continue end
+        --// Skip ignored values
+        if Ignore and table_find(Ignore, Value) then 
+            continue 
+        end
         
         Key = self:CheckValue(Key, Ignore, Cache)
         New[Key] = self:CheckValue(Value, Ignore, Cache)
     end
 
-    --// Master clear
+    --// Clear cache if this is the root call
     if not Visited then
-        table.clear(Cache)
+        table_clear(Cache)
     end
     
     return New
 end
 
-function Process:Unpack(Table: table)
-    if not Table then return Table end
-	local Length = table.maxn(Table)
-	return unpack(Table, 1, Length)
+--[[
+    Unpacks a table safely, handling sparse arrays
+    @param Table table? - The table to unpack
+    @return ... - The unpacked values
+]]
+function Process:Unpack(Table: {any}?): ...any
+    if not Table then 
+        return 
+    end
+    
+    local Length = table_maxn(Table)
+    return unpack(Table, 1, Length)
 end
 
-function Process:PushConfig(Overwrites)
+--[[
+    Pushes configuration overwrites into the module
+    @param Overwrites table - The overwrites to apply
+]]
+function Process:PushConfig(Overwrites: {[string]: any})
     self:Merge(self, Overwrites)
 end
 
-function Process:FuncExists(Name: string)
-	return SigmaENV[Name]
+--[[
+    Checks if a function exists in the executor environment
+    @param Name string - The function name
+    @return any - The function if it exists
+]]
+function Process:FuncExists(Name: string): any
+    return SigmaENV[Name]
 end
 
+--[[
+    Checks if the current executor is blacklisted
+    @return boolean - Whether the executor is supported
+]]
 function Process:CheckExecutor(): boolean
     local Blacklisted = {
         "xeno",
@@ -218,18 +328,29 @@ function Process:CheckExecutor(): boolean
         "jjsploit"
     }
 
-    local Name = identifyexecutor():lower()
-    local IsBlacklisted = table.find(Blacklisted, Name)
+    local Success, ExecutorName = pcall(identifyexecutor)
+    
+    if not Success then
+        return true --// Allow if we can't identify
+    end
+    
+    local Name = string_lower(ExecutorName)
+    local IsBlacklisted = table_find(Blacklisted, Name)
 
-    --// Some executors have broken functionality
     if IsBlacklisted then
-        Ui:ShowUnsupportedExecutor(Name)
+        if Ui then
+            Ui:ShowUnsupportedExecutor(Name)
+        end
         return false
     end
 
     return true
 end
 
+--[[
+    Checks if required functions exist in the executor
+    @return boolean - Whether all required functions exist
+]]
 function Process:CheckFunctions(): boolean
     local CoreFunctions = {
         "hookmetamethod",
@@ -238,27 +359,30 @@ function Process:CheckFunctions(): boolean
         "setreadonly"
     }
 
-    --// Check if the functions exist in the ENV
     for _, Name in CoreFunctions do
         local Func = self:FuncExists(Name)
-        if Func then continue end
-
-        --// Function missing!
-        Ui:ShowUnsupported(Name)
-        return false
+        
+        if not Func then
+            if Ui then
+                Ui:ShowUnsupported(Name)
+            end
+            return false
+        end
     end
 
     return true
 end
 
+--[[
+    Checks if Sigma Spy is supported on the current executor
+    @return boolean - Whether the executor is supported
+]]
 function Process:CheckIsSupported(): boolean
-    --// Check if the executor is blacklisted
     local ExecutorSupported = self:CheckExecutor()
     if not ExecutorSupported then
         return false
     end
 
-    --// Check if the core functions exist
     local FunctionsSupported = self:CheckFunctions()
     if not FunctionsSupported then
         return false
@@ -267,106 +391,188 @@ function Process:CheckIsSupported(): boolean
     return true
 end
 
-function Process:GetClassData(Remote: Instance): table?
+--[[
+    Gets the class data for a remote instance
+    @param Remote Instance - The remote to check
+    @return RemoteClassData? - The class data
+]]
+function Process:GetClassData(Remote: Instance): RemoteClassData?
     local RemoteClassData = self.RemoteClassData
     local ClassName = Hook:Index(Remote, "ClassName")
 
     return RemoteClassData[ClassName]
 end
 
+--[[
+    Checks if a remote is protected (internal use)
+    @param Remote Instance - The remote to check
+    @return boolean - Whether the remote is protected
+]]
 function Process:IsProtectedRemote(Remote: Instance): boolean
+    if not Communication then
+        return false
+    end
+    
     local IsDebug = Remote == Communication.DebugIdRemote
-    local IsChannel = Remote == (WrappedChannel and Channel.Channel or Channel)
+    local ChannelCheck = WrappedChannel and Channel.Channel or Channel
+    local IsChannel = Remote == ChannelCheck
 
     return IsDebug or IsChannel
 end
 
+--[[
+    Checks if a remote is allowed for a specific transfer type
+    @param Remote Instance - The remote to check
+    @param TransferType string - "Send" or "Receive"
+    @param Method string? - The specific method
+    @return boolean? - Whether the remote is allowed
+]]
 function Process:RemoteAllowed(Remote: Instance, TransferType: string, Method: string?): boolean?
-    if typeof(Remote) ~= 'Instance' then return end
+    if typeof(Remote) ~= "Instance" then 
+        return nil
+    end
     
-    --// Check if the Remote is protected
-    if self:IsProtectedRemote(Remote) then return end
+    --// Check if protected
+    if self:IsProtectedRemote(Remote) then 
+        return nil
+    end
 
-    --// Fetch class table
-	local ClassData = self:GetClassData(Remote)
-	if not ClassData then return end
+    --// Get class data
+    local ClassData = self:GetClassData(Remote)
+    if not ClassData then 
+        return nil
+    end
 
-    --// Check if the transfer type has data
-	local Allowed = ClassData[TransferType]
-	if not Allowed then return end
+    --// Check transfer type
+    local Allowed = ClassData[TransferType]
+    if not Allowed then 
+        return nil
+    end
 
-    --// Check if the method is allowed
-	if Method then
-		return table.find(Allowed, Method) ~= nil
-	end
+    --// Check specific method
+    if Method then
+        return table_find(Allowed, Method) ~= nil
+    end
 
-	return true
+    return true
 end
 
-function Process:SetExtraData(Data: table)
-    if not Data then return end
+--[[
+    Sets extra data to be included with remote logs
+    @param Data table? - The extra data
+]]
+function Process:SetExtraData(Data: {[string]: any}?)
+    if not Data then 
+        return 
+    end
     self.ExtraData = Data
 end
 
-function Process:GetRemoteSpoof(Remote: Instance, Method: string, ...): table?
+--[[
+    Gets a return spoof for a specific remote
+    @param Remote Instance - The remote
+    @param Method string - The method being called
+    @param ... any - Original arguments
+    @return table? - Spoofed return values
+]]
+function Process:GetRemoteSpoof(Remote: Instance, Method: string, ...: any): {any}?
+    if not ReturnSpoofs then
+        return nil
+    end
+    
     local Spoof = ReturnSpoofs[Remote]
 
-    if not Spoof then return end
-    if Spoof.Method ~= Method then return end
+    if not Spoof then 
+        return nil
+    end
+    
+    if Spoof.Method ~= Method then 
+        return nil
+    end
 
     local ReturnValues = Spoof.Return
 
-    --// Call the ReturnValues function type
+    --// Handle function return types
     if typeof(ReturnValues) == "function" then
-        ReturnValues = ReturnValues(...)
+        local Success, Result = pcall(ReturnValues, ...)
+        if Success then
+            return Result
+        end
+        return nil
     end
 
-	return ReturnValues
+    return ReturnValues
 end
 
-function Process:SetNewReturnSpoofs(NewReturnSpoofs: table)
+--[[
+    Sets new return spoofs
+    @param NewReturnSpoofs table - The new spoofs
+]]
+function Process:SetNewReturnSpoofs(NewReturnSpoofs: {[Instance]: any})
     ReturnSpoofs = NewReturnSpoofs
 end
 
-function Process:FindCallingLClosure(Offset: number)
-    local Getfenv = Hook:GetOriginalFunc(getfenv)
-    Offset += 1
+--[[
+    Finds the calling Lua closure with an offset
+    @param Offset number - Stack offset
+    @return function? - The calling function
+]]
+function Process:FindCallingLClosure(Offset: number): ((...any) -> ...any)?
+    local Getfenv = Hook and Hook:GetOriginalFunc(getfenv) or getfenv
+    Offset = Offset + 1
 
     while true do
-        Offset += 1
+        Offset = Offset + 1
 
-        --// Check if the stack level is valid
+        --// Check if stack level is valid
         local IsValid = debug.info(Offset, "l") ~= -1
-        if not IsValid then continue end
+        if not IsValid then 
+            continue 
+        end
 
-        --// Check if the function is valid
+        --// Get function at stack level
         local Function = debug.info(Offset, "f")
-        if not Function then return end
-        if Getfenv(Function) == SigmaENV then continue end
+        if not Function then 
+            return nil
+        end
+        
+        --// Skip Sigma Spy functions
+        local Success, FuncEnv = pcall(Getfenv, Function)
+        if Success and FuncEnv == SigmaENV then 
+            continue 
+        end
 
         return Function
     end
 end
 
-function Process:Decompile(Script: LocalScript | ModuleScript): string
+--[[
+    Decompiles a script using available methods
+    @param Script LocalScript | ModuleScript - The script to decompile
+    @return string - The decompiled code
+    @return boolean - Whether an error occurred
+]]
+function Process:Decompile(Script: LocalScript | ModuleScript): (string, boolean)
     local KonstantAPI = "http://api.plusgiant5.com/konstant/decompile"
-    local ForceKonstant = Config.ForceKonstantDecompiler
+    local ForceKonstant = Config and Config.ForceKonstantDecompiler
 
-    --// Use built-in decompiler if the executor supports it
+    --// Use built-in decompiler if available
     if decompile and not ForceKonstant then 
-        return decompile(Script)
+        local Success, Result = pcall(decompile, Script)
+        if Success then
+            return Result, false
+        end
+        return "-- Decompilation failed: " .. tostring(Result), true
     end
 
-    --// getscriptbytecode
+    --// Get script bytecode
     local Success, Bytecode = pcall(getscriptbytecode, Script)
     if not Success then
-        local Error = `--Failed to get script bytecode, error:\n`
-        Error ..= `\n--[[\n{Bytecode}\n]]`
-        return Error, true
+        return "-- Failed to get script bytecode:\n--[[\n" .. tostring(Bytecode) .. "\n]]", true
     end
     
-    --// Send POST request to the API
-    local Responce = request({
+    --// Send to Konstant API
+    local Response = request({
         Url = KonstantAPI,
         Body = Bytecode,
         Method = "POST",
@@ -375,95 +581,110 @@ function Process:Decompile(Script: LocalScript | ModuleScript): string
         },
     })
 
-    --// Error check
-    if Responce.StatusCode ~= 200 then
-        local Error = `--[KONSTANT] Error occured while requesting the API, error:\n`
-        Error ..= `\n--[[\n{Responce.Body}\n]]`
-        return Error, true
+    if Response.StatusCode ~= 200 then
+        return "-- [KONSTANT] API error:\n--[[\n" .. Response.Body .. "\n]]", true
     end
 
-    return Responce.Body
+    return Response.Body, false
 end
 
-function Process:GetScriptFromFunc(Func: (...any) -> ...any)
-    if not Func then return end
+--[[
+    Gets the script from a function's environment
+    @param Func function? - The function
+    @return Instance? - The script
+]]
+function Process:GetScriptFromFunc(Func: ((...any) -> ...any)?): Instance?
+    if not Func then 
+        return nil
+    end
 
     local Success, ENV = pcall(getfenv, Func)
-    if not Success then return end
+    if not Success then 
+        return nil
+    end
     
-    --// Blacklist sigma spy
-    if self:IsSigmaSpyENV(ENV) then return end
+    --// Skip Sigma Spy environment
+    if self:IsSigmaSpyENV(ENV) then 
+        return nil
+    end
 
     return rawget(ENV, "script")
 end
 
-function Process:ConnectionIsValid(Connection: table): boolean
-    local ValueReplacements = {
-		["Script"] = function(Connection: table): Script?
-			local Function = Connection.Function
-			if not Function then return end
-
-			return self:GetScriptFromFunc(Function)
-		end
-	}
-
-    --// Check if these properties are valid
-    local ToCheck = {
-        "Script"
-    }
-    for _, Property in ToCheck do
-        local Replacement = ValueReplacements[Property]
-        local Value
-
-        --// Check if there's a function for a property
-        if Replacement then
-            Value = Replacement(Connection)
-        end
-
-        --// Check if the property has a value
-        if Value == nil then 
-            return false 
-        end
+--[[
+    Checks if a connection is valid for logging
+    @param Connection table - The connection data
+    @return boolean - Whether the connection is valid
+]]
+function Process:ConnectionIsValid(Connection: {Function: ((...any) -> ...any)?, [string]: any}): boolean
+    local Function = Connection.Function
+    if not Function then 
+        return false 
     end
 
-    return true
+    local Script = self:GetScriptFromFunc(Function)
+    return Script ~= nil
 end
 
-function Process:FilterConnections(Signal: RBXScriptSignal): table
+--[[
+    Filters connections to only valid ones
+    @param Signal RBXScriptSignal - The signal
+    @return table - Valid connections
+]]
+function Process:FilterConnections(Signal: RBXScriptSignal): {{Function: (...any) -> ...any, [string]: any}}
     local Processed = {}
+    
+    local Success, Connections = pcall(getconnections, Signal)
+    if not Success then
+        return Processed
+    end
 
-    --// Filter each connection
-    for _, Connection in getconnections(Signal) do
-        if not self:ConnectionIsValid(Connection) then continue end
-        table.insert(Processed, Connection)
+    for _, Connection in Connections do
+        if self:ConnectionIsValid(Connection) then
+            table_insert(Processed, Connection)
+        end
     end
 
     return Processed
 end
 
-function Process:IsSigmaSpyENV(Env: table): boolean
+--[[
+    Checks if an environment is Sigma Spy's environment
+    @param Env table - The environment to check
+    @return boolean - Whether it's Sigma Spy's environment
+]]
+function Process:IsSigmaSpyENV(Env: {[any]: any}): boolean
     return Env == SigmaENV
 end
 
-function Process:GetRemoteData(Id: string)
+--[[
+    Gets or creates remote data for a remote ID
+    @param Id string - The remote's debug ID
+    @return RemoteOptions - The remote options
+]]
+function Process:GetRemoteData(Id: string): RemoteOptions
     local RemoteOptions = self.RemoteOptions
 
-    --// Check for existing remote data
-	local Existing = RemoteOptions[Id]
-	if Existing then return Existing end
-	
-    --// Base remote data
-	local Data = {
-		Excluded = false,
-		Blocked = false
-	}
+    local Existing = RemoteOptions[Id]
+    if Existing then 
+        return Existing 
+    end
+    
+    local Data: RemoteOptions = {
+        Excluded = false,
+        Blocked = false
+    }
 
-	RemoteOptions[Id] = Data
-	return Data
+    RemoteOptions[Id] = Data
+    return Data
 end
 
-function Process:CallDiscordRPC(Body: table)
-    request({
+--[[
+    Calls Discord RPC with a request body
+    @param Body table - The RPC body
+]]
+function Process:CallDiscordRPC(Body: {[string]: any})
+    pcall(request, {
         Url = "http://127.0.0.1:6463/rpc?v=1",
         Method = "POST",
         Headers = {
@@ -474,6 +695,10 @@ function Process:CallDiscordRPC(Body: table)
     })
 end
 
+--[[
+    Prompts a Discord invite via RPC
+    @param InviteCode string - The invite code
+]]
 function Process:PromptDiscordInvite(InviteCode: string)
     self:CallDiscordRPC({
         cmd = "INVITE_BROWSER",
@@ -484,39 +709,58 @@ function Process:PromptDiscordInvite(InviteCode: string)
     })
 end
 
-local ProcessCallback = newcclosure(function(Data: RemoteData, Remote, ...): table?
-    --// Unpack Data
+--// Process callback for remote calls
+local ProcessCallback = newcclosure(function(Data: RemoteData, Remote: Instance, ...): {any}?
     local OriginalFunc = Data.OriginalFunc
     local Id = Data.Id
     local Method = Data.Method
 
-    --// Check if the Remote is Blocked
+    --// Check if blocked
     local RemoteData = Process:GetRemoteData(Id)
-    if RemoteData.Blocked then return {} end
+    if RemoteData.Blocked then 
+        return {} 
+    end
 
-    --// Check for a spoof
+    --// Check for spoof
     local Spoof = Process:GetRemoteSpoof(Remote, Method, OriginalFunc, ...)
-    if Spoof then return Spoof end
+    if Spoof then 
+        return Spoof 
+    end
 
-    --// Check if the orignal function was passed
-    if not OriginalFunc then return end
+    --// Call original if provided
+    if not OriginalFunc then 
+        return nil
+    end
 
-    --// Invoke orignal function
-    return {
-        OriginalFunc(Remote, ...)
-    }
+    local Success, Result = pcall(function()
+        return {OriginalFunc(Remote, ...)}
+    end)
+    
+    if Success then
+        return Result
+    end
+    
+    return nil
 end)
 
-function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
-    --// Unpack Data
-	local Method = Data.Method
+--[[
+    Processes a remote call/receive
+    @param Data RemoteData - The remote data
+    @param Remote Instance - The remote instance
+    @param ... any - Arguments
+    @return table? - Return values
+]]
+function Process:ProcessRemote(Data: RemoteData, Remote: Instance, ...): {any}?
+    local Method = Data.Method
     local TransferType = Data.TransferType
     local IsReceive = Data.IsReceive
 
-	--// Check if the transfertype method is allowed
-	if TransferType and not self:RemoteAllowed(Remote, TransferType, Method) then return end
+    --// Verify remote is allowed
+    if TransferType and not self:RemoteAllowed(Remote, TransferType, Method) then 
+        return nil
+    end
 
-    --// Fetch details
+    --// Get remote details
     local Id = Communication:GetDebugId(Remote)
     local ClassData = self:GetClassData(Remote)
     local Timestamp = tick()
@@ -524,31 +768,31 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     local CallingFunction
     local SourceScript
 
-    --// Add extra data into the log if needed
+    --// Include extra data if set
     local ExtraData = self.ExtraData
     if ExtraData then
         self:Merge(Data, ExtraData)
     end
 
-    --// Get caller information
+    --// Get caller information for sends
     if not IsReceive then
         CallingFunction = self:FindCallingLClosure(6)
         SourceScript = CallingFunction and self:GetScriptFromFunc(CallingFunction) or nil
     end
 
-    --// Add to queue
+    --// Build complete data
     self:Merge(Data, {
         Remote = cloneref(Remote),
-		CallingScript = getcallingscript(),
+        CallingScript = getcallingscript(),
         CallingFunction = CallingFunction,
         SourceScript = SourceScript,
         Id = Id,
-		ClassData = ClassData,
+        ClassData = ClassData,
         Timestamp = Timestamp,
         Args = {...}
     })
 
-    --// Invoke the Remote and log return values
+    --// Call remote and log return values
     local ReturnValues = ProcessCallback(Data, Remote, ...)
     Data.ReturnValues = ReturnValues
 
@@ -558,25 +802,44 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     return ReturnValues
 end
 
-function Process:SetAllRemoteData(Key: string, Value)
+--[[
+    Sets a property on all remote data
+    @param Key string - The property key
+    @param Value any - The value to set
+]]
+function Process:SetAllRemoteData(Key: string, Value: any)
     local RemoteOptions = self.RemoteOptions
-	for RemoteID, Data in next, RemoteOptions do
-		Data[Key] = Value
-	end
+    
+    for _, Data in next, RemoteOptions do
+        Data[Key] = Value
+    end
 end
 
---// The communication creates a different table address
---// Recived tables will not be the same
-function Process:SetRemoteData(Id: string, RemoteData: table)
+--[[
+    Sets remote data for a specific ID
+    @param Id string - The remote ID
+    @param RemoteData table - The data to set
+]]
+function Process:SetRemoteData(Id: string, RemoteData: RemoteOptions)
     local RemoteOptions = self.RemoteOptions
     RemoteOptions[Id] = RemoteData
 end
 
-function Process:UpdateRemoteData(Id: string, RemoteData: table)
+--[[
+    Updates remote data via communication channel
+    @param Id string - The remote ID
+    @param RemoteData table - The updated data
+]]
+function Process:UpdateRemoteData(Id: string, RemoteData: RemoteOptions)
     Communication:Communicate("RemoteData", Id, RemoteData)
 end
 
-function Process:UpdateAllRemoteData(Key: string, Value)
+--[[
+    Updates all remote data via communication channel
+    @param Key string - The property key
+    @param Value any - The value to set
+]]
+function Process:UpdateAllRemoteData(Key: string, Value: any)
     Communication:Communicate("AllRemoteData", Key, Value)
 end
 
